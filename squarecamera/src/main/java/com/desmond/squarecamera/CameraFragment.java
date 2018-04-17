@@ -5,6 +5,7 @@ import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.content.res.Configuration;
 import android.hardware.Camera;
 import android.hardware.Camera.CameraInfo;
 import android.hardware.Camera.Size;
@@ -22,6 +23,7 @@ import android.view.SurfaceHolder;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewTreeObserver;
+import android.view.animation.AccelerateDecelerateInterpolator;
 import android.widget.ImageView;
 import android.widget.TextView;
 
@@ -33,7 +35,7 @@ public class CameraFragment extends Fragment implements SurfaceHolder.Callback, 
     public static final String TAG = CameraFragment.class.getSimpleName();
     public static final String CAMERA_ID_KEY = "camera_id";
     public static final String CAMERA_FLASH_KEY = "flash_mode";
-    public static final String PREVIEW_HEIGHT_KEY = "preview_height";
+    public static final String IMAGE_INFO = "image_info";
 
     private static final int PICTURE_SIZE_MAX_WIDTH = 1280;
     private static final int PREVIEW_SIZE_MAX_WIDTH = 640;
@@ -44,11 +46,9 @@ public class CameraFragment extends Fragment implements SurfaceHolder.Callback, 
     private SquareCameraPreview mPreviewView;
     private SurfaceHolder mSurfaceHolder;
 
-    private int mDisplayOrientation;
-    private int mLayoutOrientation;
+    private boolean mIsSafeToTakePhoto = false;
 
-    private int mCoverHeight;
-    private int mPreviewHeight;
+    private ImageParameters mImageParameters;
 
     private CameraOrientationListener mOrientationListener;
 
@@ -59,30 +59,37 @@ public class CameraFragment extends Fragment implements SurfaceHolder.Callback, 
     public CameraFragment() {}
 
     @Override
-    public void onAttach(Activity activity) {
-        super.onAttach(activity);
-        mOrientationListener = new CameraOrientationListener(activity);
+    public void onAttach(Context context) {
+        super.onAttach(context);
+        mOrientationListener = new CameraOrientationListener(context);
+    }
+
+    @Override
+    public void onCreate(@Nullable Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        // Restore your state here because a double rotation with this fragment
+        // in the backstack will cause improper state restoration
+        // onCreate() -> onSavedInstanceState() instead of going through onCreateView()
+        if (savedInstanceState == null) {
+            mCameraID = getBackCameraID();
+            mFlashMode = CameraSettingPreferences.getCameraFlashMode(getActivity());
+            mImageParameters = new ImageParameters();
+        } else {
+            mCameraID = savedInstanceState.getInt(CAMERA_ID_KEY);
+            mFlashMode = savedInstanceState.getString(CAMERA_FLASH_KEY);
+            mImageParameters = savedInstanceState.getParcelable(IMAGE_INFO);
+        }
     }
 
     @Override
     public View onCreateView(LayoutInflater inflater, ViewGroup container,
                              Bundle savedInstanceState) {
-        return inflater.inflate(R.layout.fragment_camera, container, false);
+        return inflater.inflate(R.layout.squarecamera__fragment_camera, container, false);
     }
 
     @Override
     public void onViewCreated(View view, @Nullable Bundle savedInstanceState) {
         super.onViewCreated(view, savedInstanceState);
-
-        if (savedInstanceState == null) {
-            mCameraID = getBackCameraID();
-            mFlashMode = Camera.Parameters.FLASH_MODE_AUTO;
-        } else {
-            mCameraID = savedInstanceState.getInt(CAMERA_ID_KEY);
-            mFlashMode = savedInstanceState.getString(CAMERA_FLASH_KEY);
-            mPreviewHeight = savedInstanceState.getInt(PREVIEW_HEIGHT_KEY);
-        }
-
         mOrientationListener.enable();
 
         mPreviewView = (SquareCameraPreview) view.findViewById(R.id.camera_preview_view);
@@ -91,18 +98,23 @@ public class CameraFragment extends Fragment implements SurfaceHolder.Callback, 
         final View topCoverView = view.findViewById(R.id.cover_top_view);
         final View btnCoverView = view.findViewById(R.id.cover_bottom_view);
 
-        if (mCoverHeight == 0) {
+        mImageParameters.mIsPortrait =
+                getResources().getConfiguration().orientation == Configuration.ORIENTATION_PORTRAIT;
+
+        if (savedInstanceState == null) {
             ViewTreeObserver observer = mPreviewView.getViewTreeObserver();
             observer.addOnGlobalLayoutListener(new ViewTreeObserver.OnGlobalLayoutListener() {
                 @Override
                 public void onGlobalLayout() {
-                    int width = mPreviewView.getWidth();
-                    mPreviewHeight = mPreviewView.getHeight();
-                    mCoverHeight = (mPreviewHeight - width) / 2;
+                    mImageParameters.mPreviewWidth = mPreviewView.getWidth();
+                    mImageParameters.mPreviewHeight = mPreviewView.getHeight();
 
-                    Log.d(TAG, "preview width " + width + " height " + mPreviewHeight);
-                    topCoverView.getLayoutParams().height = mCoverHeight;
-                    btnCoverView.getLayoutParams().height = mCoverHeight;
+                    mImageParameters.mCoverWidth = mImageParameters.mCoverHeight
+                            = mImageParameters.calculateCoverWidthHeight();
+
+//                    Log.d(TAG, "parameters: " + mImageParameters.getStringValues());
+//                    Log.d(TAG, "cover height " + topCoverView.getHeight());
+                    resizeTopAndBtmCover(topCoverView, btnCoverView);
 
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN) {
                         mPreviewView.getViewTreeObserver().removeOnGlobalLayoutListener(this);
@@ -112,8 +124,13 @@ public class CameraFragment extends Fragment implements SurfaceHolder.Callback, 
                 }
             });
         } else {
-            topCoverView.getLayoutParams().height = mCoverHeight;
-            btnCoverView.getLayoutParams().height = mCoverHeight;
+            if (mImageParameters.isPortrait()) {
+                topCoverView.getLayoutParams().height = mImageParameters.mCoverHeight;
+                btnCoverView.getLayoutParams().height = mImageParameters.mCoverHeight;
+            } else {
+                topCoverView.getLayoutParams().width = mImageParameters.mCoverWidth;
+                btnCoverView.getLayoutParams().width = mImageParameters.mCoverWidth;
+            }
         }
 
         final ImageView swapCameraBtn = (ImageView) view.findViewById(R.id.change_camera);
@@ -130,24 +147,22 @@ public class CameraFragment extends Fragment implements SurfaceHolder.Callback, 
         });
 
         final View changeCameraFlashModeBtn = view.findViewById(R.id.flash);
-        final TextView autoFlashIcon = (TextView) view.findViewById(R.id.auto_flash_icon);
         changeCameraFlashModeBtn.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 if (mFlashMode.equalsIgnoreCase(Camera.Parameters.FLASH_MODE_AUTO)) {
                     mFlashMode = Camera.Parameters.FLASH_MODE_ON;
-                    autoFlashIcon.setText("On");
                 } else if (mFlashMode.equalsIgnoreCase(Camera.Parameters.FLASH_MODE_ON)) {
                     mFlashMode = Camera.Parameters.FLASH_MODE_OFF;
-                    autoFlashIcon.setText("Off");
                 } else if (mFlashMode.equalsIgnoreCase(Camera.Parameters.FLASH_MODE_OFF)) {
                     mFlashMode = Camera.Parameters.FLASH_MODE_AUTO;
-                    autoFlashIcon.setText("Auto");
                 }
 
+                setupFlashMode();
                 setupCamera();
             }
         });
+        setupFlashMode();
 
         final ImageView takePhotoBtn = (ImageView) view.findViewById(R.id.capture_image_button);
         takePhotoBtn.setOnClickListener(new View.OnClickListener() {
@@ -158,16 +173,44 @@ public class CameraFragment extends Fragment implements SurfaceHolder.Callback, 
         });
     }
 
+    private void setupFlashMode() {
+        View view = getView();
+        if (view == null) return;
+
+        final TextView autoFlashIcon = (TextView) view.findViewById(R.id.auto_flash_icon);
+        if (Camera.Parameters.FLASH_MODE_AUTO.equalsIgnoreCase(mFlashMode)) {
+            autoFlashIcon.setText("Auto");
+        } else if (Camera.Parameters.FLASH_MODE_ON.equalsIgnoreCase(mFlashMode)) {
+            autoFlashIcon.setText("On");
+        }  else if (Camera.Parameters.FLASH_MODE_OFF.equalsIgnoreCase(mFlashMode)) {
+            autoFlashIcon.setText("Off");
+        }
+    }
+
     @Override
     public void onSaveInstanceState(Bundle outState) {
+//        Log.d(TAG, "onSaveInstanceState");
         outState.putInt(CAMERA_ID_KEY, mCameraID);
         outState.putString(CAMERA_FLASH_KEY, mFlashMode);
-        outState.putInt(PREVIEW_HEIGHT_KEY, mPreviewHeight);
+        outState.putParcelable(IMAGE_INFO, mImageParameters);
         super.onSaveInstanceState(outState);
     }
 
+    private void resizeTopAndBtmCover( final View topCover, final View bottomCover) {
+        ResizeAnimation resizeTopAnimation
+                = new ResizeAnimation(topCover, mImageParameters);
+        resizeTopAnimation.setDuration(800);
+        resizeTopAnimation.setInterpolator(new AccelerateDecelerateInterpolator());
+        topCover.startAnimation(resizeTopAnimation);
+
+        ResizeAnimation resizeBtmAnimation
+                = new ResizeAnimation(bottomCover, mImageParameters);
+        resizeBtmAnimation.setDuration(800);
+        resizeBtmAnimation.setInterpolator(new AccelerateDecelerateInterpolator());
+        bottomCover.startAnimation(resizeBtmAnimation);
+    }
+
     private void getCamera(int cameraID) {
-        Log.d(TAG, "get camera with id " + cameraID);
         try {
             mCamera = Camera.open(cameraID);
             mPreviewView.setCamera(mCamera);
@@ -175,6 +218,20 @@ public class CameraFragment extends Fragment implements SurfaceHolder.Callback, 
             Log.d(TAG, "Can't open camera with id " + cameraID);
             e.printStackTrace();
         }
+    }
+
+    /**
+     * Restart the camera preview
+     */
+    private void restartPreview() {
+        if (mCamera != null) {
+            stopCameraPreview();
+            mCamera.release();
+            mCamera = null;
+        }
+
+        getCamera(mCameraID);
+        startCameraPreview();
     }
 
     /**
@@ -187,6 +244,9 @@ public class CameraFragment extends Fragment implements SurfaceHolder.Callback, 
         try {
             mCamera.setPreviewDisplay(mSurfaceHolder);
             mCamera.startPreview();
+
+            setSafeToTakePhoto(true);
+            setCameraFocusReady(true);
         } catch (IOException e) {
             Log.d(TAG, "Can't start camera preview due to IOException " + e);
             e.printStackTrace();
@@ -197,9 +257,22 @@ public class CameraFragment extends Fragment implements SurfaceHolder.Callback, 
      * Stop the camera preview
      */
     private void stopCameraPreview() {
+        setSafeToTakePhoto(false);
+        setCameraFocusReady(false);
+
         // Nulls out callbacks, stops face detection
         mCamera.stopPreview();
         mPreviewView.setCamera(null);
+    }
+
+    private void setSafeToTakePhoto(final boolean isSafeToTakePhoto) {
+        mIsSafeToTakePhoto = isSafeToTakePhoto;
+    }
+
+    private void setCameraFocusReady(final boolean isFocusReady) {
+        if (this.mPreviewView != null) {
+            mPreviewView.setIsFocusReady(isFocusReady);
+        }
     }
 
     /**
@@ -210,6 +283,7 @@ public class CameraFragment extends Fragment implements SurfaceHolder.Callback, 
         CameraInfo cameraInfo = new CameraInfo();
         Camera.getCameraInfo(mCameraID, cameraInfo);
 
+        // Clockwise rotation needed to align the window display to the natural position
         int rotation = getActivity().getWindowManager().getDefaultDisplay().getRotation();
         int degrees = 0;
 
@@ -234,7 +308,8 @@ public class CameraFragment extends Fragment implements SurfaceHolder.Callback, 
 
         int displayOrientation;
 
-        // Camera direction
+        // CameraInfo.Orientation is the angle relative to the natural position of the device
+        // in clockwise rotation (angle that is rotated clockwise from the natural position)
         if (cameraInfo.facing == CameraInfo.CAMERA_FACING_FRONT) {
             // Orientation is angle of rotation when facing the camera for
             // the camera image to match the natural orientation of the device
@@ -244,10 +319,10 @@ public class CameraFragment extends Fragment implements SurfaceHolder.Callback, 
             displayOrientation = (cameraInfo.orientation - degrees + 360) % 360;
         }
 
-        mDisplayOrientation = (cameraInfo.orientation - degrees + 360) % 360;
-        mLayoutOrientation = degrees;
+        mImageParameters.mDisplayOrientation = displayOrientation;
+        mImageParameters.mLayoutOrientation = degrees;
 
-        mCamera.setDisplayOrientation(displayOrientation);
+        mCamera.setDisplayOrientation(mImageParameters.mDisplayOrientation);
     }
 
     /**
@@ -312,14 +387,6 @@ public class CameraFragment extends Fragment implements SurfaceHolder.Callback, 
         return bestSize;
     }
 
-    private void restartPreview() {
-        stopCameraPreview();
-        mCamera.release();
-
-        getCamera(mCameraID);
-        startCameraPreview();
-    }
-
     private int getFrontCameraID() {
         PackageManager pm = getActivity().getPackageManager();
         if (pm.hasSystemFeature(PackageManager.FEATURE_CAMERA_FRONT)) {
@@ -337,21 +404,35 @@ public class CameraFragment extends Fragment implements SurfaceHolder.Callback, 
      * Take a picture
      */
     private void takePicture() {
-        mOrientationListener.rememberOrientation();
 
-        // Shutter callback occurs after the image is captured. This can
-        // be used to trigger a sound to let the user know that image is taken
-        Camera.ShutterCallback shutterCallback = null;
+        if (mIsSafeToTakePhoto) {
+            setSafeToTakePhoto(false);
 
-        // Raw callback occurs when the raw image data is available
-        Camera.PictureCallback raw = null;
+            mOrientationListener.rememberOrientation();
 
-        // postView callback occurs when a scaled, fully processed
-        // postView image is available.
-        Camera.PictureCallback postView = null;
+            // Shutter callback occurs after the image is captured. This can
+            // be used to trigger a sound to let the user know that image is taken
+            Camera.ShutterCallback shutterCallback = null;
 
-        // jpeg callback occurs when the compressed image is available
-        mCamera.takePicture(shutterCallback, raw, postView, this);
+            // Raw callback occurs when the raw image data is available
+            Camera.PictureCallback raw = null;
+
+            // postView callback occurs when a scaled, fully processed
+            // postView image is available.
+            Camera.PictureCallback postView = null;
+
+            // jpeg callback occurs when the compressed image is available
+            mCamera.takePicture(shutterCallback, raw, postView, this);
+        }
+    }
+
+    @Override
+    public void onResume() {
+        super.onResume();
+
+        if (mCamera == null) {
+            restartPreview();
+        }
     }
 
     @Override
@@ -359,8 +440,14 @@ public class CameraFragment extends Fragment implements SurfaceHolder.Callback, 
         mOrientationListener.disable();
 
         // stop the preview
-        stopCameraPreview();
-        mCamera.release();
+        if (mCamera != null) {
+            stopCameraPreview();
+            mCamera.release();
+            mCamera = null;
+        }
+
+        CameraSettingPreferences.saveCameraFlashMode(getActivity(), mFlashMode);
+
         super.onStop();
     }
 
@@ -403,22 +490,34 @@ public class CameraFragment extends Fragment implements SurfaceHolder.Callback, 
      */
     @Override
     public void onPictureTaken(byte[] data, Camera camera) {
-        int rotation = (
-                mDisplayOrientation
-                        + mOrientationListener.getRememberedNormalOrientation()
-                        + mLayoutOrientation
-        ) % 360;
-
-//        Bitmap bitmap = ImageUtility.rotatePicture(getActivity(), rotation, data);
-//        Uri uri = ImageUtility.savePicture(getActivity(), bitmap);
+        int rotation = getPhotoRotation();
+//        Log.d(TAG, "normal orientation: " + orientation);
+//        Log.d(TAG, "Rotate Picture by: " + rotation);
         getFragmentManager()
                 .beginTransaction()
                 .replace(
                         R.id.fragment_container,
-                        EditSavePhotoFragment.newInstance(data, rotation, mCoverHeight, mPreviewHeight),
+                        EditSavePhotoFragment.newInstance(data, rotation, mImageParameters.createCopy()),
                         EditSavePhotoFragment.TAG)
                 .addToBackStack(null)
                 .commit();
+
+        setSafeToTakePhoto(true);
+    }
+
+    private int getPhotoRotation() {
+        int rotation;
+        int orientation = mOrientationListener.getRememberedNormalOrientation();
+        CameraInfo info = new CameraInfo();
+        Camera.getCameraInfo(mCameraID, info);
+
+        if (info.facing == CameraInfo.CAMERA_FACING_FRONT) {
+            rotation = (info.orientation - orientation + 360) % 360;
+        } else {
+            rotation = (info.orientation + orientation) % 360;
+        }
+
+        return rotation;
     }
 
     /**
@@ -440,6 +539,10 @@ public class CameraFragment extends Fragment implements SurfaceHolder.Callback, 
             }
         }
 
+        /**
+         * @param degrees Amount of clockwise rotation from the device's natural position
+         * @return Normalized degrees to just 0, 90, 180, 270
+         */
         private int normalize(int degrees) {
             if (degrees > 315 || degrees <= 45) {
                 return 0;
@@ -465,6 +568,7 @@ public class CameraFragment extends Fragment implements SurfaceHolder.Callback, 
         }
 
         public int getRememberedNormalOrientation() {
+            rememberOrientation();
             return mRememberedNormalOrientation;
         }
     }

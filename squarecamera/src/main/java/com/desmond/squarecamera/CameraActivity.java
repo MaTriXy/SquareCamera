@@ -2,11 +2,9 @@ package com.desmond.squarecamera;
 
 import android.content.Intent;
 import android.net.Uri;
-import android.os.Build;
 import android.os.Bundle;
 import android.support.v7.app.AppCompatActivity;
 import android.view.View;
-import android.view.WindowManager;
 
 
 public class CameraActivity extends AppCompatActivity {
@@ -15,25 +13,18 @@ public class CameraActivity extends AppCompatActivity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        setTheme(R.style.squarecamera__CameraFullScreenTheme);
         super.onCreate(savedInstanceState);
 
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.JELLY_BEAN) {
-            getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN,
-                    WindowManager.LayoutParams.FLAG_FULLSCREEN);
-        } else {
-            View decorView = getWindow().getDecorView();
-            // Hide the status bar.
-            int uiOptions = View.SYSTEM_UI_FLAG_FULLSCREEN;
-            decorView.setSystemUiVisibility(uiOptions);
+        if (getSupportActionBar() != null) {
+            getSupportActionBar().hide();
         }
-        getSupportActionBar().hide();
-        getWindow().setBackgroundDrawable(null);
-        setContentView(R.layout.activity_camera);
+        setContentView(R.layout.squarecamera__activity_camera);
 
         if (savedInstanceState == null) {
             getSupportFragmentManager()
                     .beginTransaction()
-                    .replace(R.id.fragment_container, CameraFragment.newInstance())
+                    .replace(R.id.fragment_container, CameraFragment.newInstance(), CameraFragment.TAG)
                     .commit();
         }
     }

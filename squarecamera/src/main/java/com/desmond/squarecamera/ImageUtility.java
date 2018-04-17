@@ -65,7 +65,7 @@ public class ImageUtility {
 
         File mediaStorageDir = new File(
                 Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
-                context.getString(R.string.app_name)
+                context.getString(R.string.squarecamera__app_name)
         );
 
         if (!mediaStorageDir.exists()) {
@@ -104,9 +104,14 @@ public class ImageUtility {
     public static Bitmap decodeSampledBitmapFromPath(String path, int reqWidth, int reqHeight) {
         final BitmapFactory.Options options = new BitmapFactory.Options();
         options.inJustDecodeBounds = true;
-        BitmapFactory.decodeFile(path, options);
+        options.inMutable = true;
+        options.inBitmap = BitmapFactory.decodeFile(path, options);
 
         options.inSampleSize = calculateInSampleSize(options, reqWidth, reqHeight);
+
+        options.inScaled = true;
+        options.inDensity = options.outWidth;
+        options.inTargetDensity = reqWidth * options.inSampleSize;
 
         options.inJustDecodeBounds = false;
         options.inPurgeable = true;
@@ -135,10 +140,17 @@ public class ImageUtility {
 
         final BitmapFactory.Options options = new BitmapFactory.Options();
         options.inJustDecodeBounds = true;
-        BitmapFactory.decodeByteArray(bitmapBytes, 0, bitmapBytes.length, options);
+        options.inMutable = true;
+        options.inBitmap = BitmapFactory.decodeByteArray(bitmapBytes, 0, bitmapBytes.length, options);
 
         // Calculate inSampleSize
         options.inSampleSize = calculateInSampleSize(options, reqWidth, reqHeight);
+
+        // Load & resize the image to be 1/inSampleSize dimensions
+        // Use when you do not want to scale the image with a inSampleSize that is a power of 2
+        options.inScaled = true;
+        options.inDensity = options.outWidth;
+        options.inTargetDensity = reqWidth * options.inSampleSize;
 
         // Decode bitmap with inSampleSize set
         options.inJustDecodeBounds = false; // If set to true, the decoder will return null (no bitmap), but the out... fields will still be set, allowing the caller to query the bitmap without having to allocate the memory for its pixels.
@@ -153,41 +165,55 @@ public class ImageUtility {
      * bitmaps using the decode* methods from {@link android.graphics.BitmapFactory}. This implementation calculates
      * the closest inSampleSize that is a power of 2 and will result in the final decoded bitmap
      * having a width and height equal to or larger than the requested width and height
+     *
+     * The function rounds up the sample size to a power of 2 or multiple
+     * of 8 because BitmapFactory only honors sample size this way.
+     * For example, BitmapFactory downsamples an image by 2 even though the
+     * request is 3. So we round up the sample size to avoid OOM.
      */
     public static int calculateInSampleSize(BitmapFactory.Options options, int reqWidth, int reqHeight) {
-        // Raw height and width of image
-        final int height = options.outHeight;
-        final int width = options.outWidth;
-        int inSampleSize = 1;
+        int initialInSampleSize = computeInitialSampleSize(options, reqWidth, reqHeight);
 
-        if (height > reqHeight || width > reqWidth) {
-            final int halfHeight = height / 2;
-            final int halfWidth = width / 2;
-
-            // Calculate the largest inSampleSize value that is a power of 2 and keeps both
-            // height and width larger than the requested height and width
-            while ((halfHeight / inSampleSize) > reqHeight
-                    && (halfWidth / inSampleSize) > reqWidth) {
-                inSampleSize *= 2;
+        int roundedInSampleSize;
+        if (initialInSampleSize <= 8) {
+            roundedInSampleSize = 1;
+            while (roundedInSampleSize < initialInSampleSize) {
+                // Shift one bit to left
+                roundedInSampleSize <<= 1;
             }
-
-            // This offers some additional logic in case the image has a strange
-            // aspect ratio. For example, a panorama may have a much larger
-            // width than height. In these cases the total pixels might still
-            // end up being too large to fit comfortably in memory, so we should
-            // be more aggressive with sample down the image (=larger inSampleSize).
-            long totalPixels = width * height / inSampleSize;
-
-            //Anything more than 2x the requested pixels we'll sample down further
-            final long totalReqPixelsCap = reqWidth * reqHeight * 2;
-
-            while (totalPixels > totalReqPixelsCap) {
-                inSampleSize *= 2;
-                totalPixels /= 2;
-            }
-
+        } else {
+            roundedInSampleSize = (initialInSampleSize + 7) / 8 * 8;
         }
-        return inSampleSize;
+
+        return roundedInSampleSize;
+    }
+
+    private static int computeInitialSampleSize(BitmapFactory.Options options, int reqWidth, int reqHeight) {
+        // Raw height and width of image
+        final double height = options.outHeight;
+        final double width = options.outWidth;
+
+        final long maxNumOfPixels = reqWidth * reqHeight;
+        final int minSideLength = Math.min(reqHeight, reqWidth);
+
+        int lowerBound = (maxNumOfPixels < 0) ? 1 :
+                (int) Math.ceil(Math.sqrt(width * height / maxNumOfPixels));
+        int upperBound = (minSideLength < 0) ? 128 :
+                (int) Math.min(Math.floor(width / minSideLength),
+                        Math.floor(height / minSideLength));
+
+        if (upperBound < lowerBound) {
+            // return the larger one when there is no overlapping zone.
+            return lowerBound;
+        }
+
+        if (maxNumOfPixels < 0 && minSideLength < 0) {
+            return 1;
+        } else if (minSideLength < 0) {
+            return lowerBound;
+        } else {
+            return upperBound;
+        }
     }
 
 }
